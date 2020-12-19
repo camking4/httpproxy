@@ -15,6 +15,8 @@ TEMP_BUFSIZE = 1024 # in bytes
 GOOD_CL_RESP = b'HTTP/1.1 200 OK\r\n\r\n'
 BAD_CL_RESP = b'HTTP/1.1 500 Internal server error\r\n\r\n'
 NOT_CACHED = b'Not in Cache'
+SET_USING_THREADS = True
+
 
 ####################### Round Trip Class #######################
 # This class is used to easily contain all of the information we need about a
@@ -108,25 +110,31 @@ def set_up_server(port):
 ####################### Networking Functions #######################
 ######## READS
 # @limits(calls=MAX_CALLS, period=MAX_PERIOD)
-def handle_read_sock(sock, server, writes, connections, round_trips, threads, wlock, rlock, proxy_cache):
+def handle_read_sock(sock, server, writes, connections, round_trips, threads, wlock, rlock, proxy_cache, USING_THREADS):
     # sock.settimeout(TIME_OUT)
     if sock == server:
         try:
-            read_thread = threading.Thread(target=read_serv_sock, args=[sock, connections, writes, round_trips, wlock, rlock, proxy_cache])
-            threads.append(read_thread)
-            print("Starting READ thread")
-            read_thread.start()
+            if USING_THREADS:
+                read_thread = threading.Thread(target=read_serv_sock, args=[sock, connections, writes, round_trips, wlock, rlock, proxy_cache, USING_THREADS])
+                threads.append(read_thread)
+                print("Starting READ thread")
+                read_thread.start()
+            else:
+                read_serv_sock(sock, round_trips, writes, connections, write_lock, read_lock, proxy_cache, USING_THREADS)
         except Exception as e:
             print("Failed to handle accept connection:", e)
             return False
         return True
     elif sock != server:
         try:
-            read_thread = threading.Thread(target=read_dest, args=[sock, writes, connections, round_trips, wlock, rlock])
-            # read_dest(sock, writes, connections, round_trips)
-            threads.append(read_thread)
-            read_thread.start()
-            print("Starting READ thread")
+            if USING_THREADS:
+                read_thread = threading.Thread(target=read_dest, args=[sock, writes, connections, round_trips, wlock, rlock, USING_THREADS])
+                # read_dest(sock, writes, connections, round_trips)
+                threads.append(read_thread)
+                print("Starting READ thread")
+                read_thread.start()
+            else:
+                read_dest(sock, round_trips, writes, connections, write_lock, read_lock, proxy_cache)
         except socket.timeout as e:
             print("WARNING: Socket conn timed out with ERROR of", e)
             try:
@@ -141,7 +149,7 @@ def handle_read_sock(sock, server, writes, connections, round_trips, threads, wl
         return True
 
 # @limits(calls=MAX_CALLS, period=MAX_PERIOD)
-def read_serv_sock(sock, connections, writes, round_trips, wlock, rlock, proxy_cache):
+def read_serv_sock(sock, connections, writes, round_trips, wlock, rlock, proxy_cache, USING_THREADS):
     print("READING ON SERVER SOCK")
     try:
         new_client, new_clientaddr = sock.accept()
@@ -158,12 +166,12 @@ def read_serv_sock(sock, connections, writes, round_trips, wlock, rlock, proxy_c
             if(enc_comm.client_sock == sock):
                 print("HANDLING SSL CONN")
                 enc_comm.req_dest = msg
-                # if(enc_comm.dest_sock != -1):
-                writes.append(enc_comm.dest_sock)
+                if(enc_comm.dest_sock != -1):
+                    writes.append(enc_comm.dest_sock)
             else:
                 enc_comm.resp_client = msg
-                # if(enc_comm.client_sock != -1):
-                writes.append(enc_comm.client_sock)
+                if(enc_comm.client_sock != -1):
+                    writes.append(enc_comm.client_sock)
             return
 
     new_client.setblocking(1)
@@ -214,8 +222,8 @@ def read_serv_sock(sock, connections, writes, round_trips, wlock, rlock, proxy_c
             print("SENT")
             new_rtconn = RoundTripConn(new_client, new_clientaddr, dest, socket.gethostbyname(hostname), "", undecoded_msg, True)
             round_trips.append(new_rtconn)
-            # if(new_client != -1):
-            connections.append(new_client)
+            if(new_client != -1):
+                connections.append(new_client)
         except Exception as e:
             new_client.send(BAD_CL_RESP)
             print("Failed to append connection with error", e)
@@ -226,11 +234,11 @@ def read_serv_sock(sock, connections, writes, round_trips, wlock, rlock, proxy_c
         round_trips.append(new_rtconn)
         with wlock:
             print("Adding writes")
-            # if(dest != -1):
-            writes.append(dest)
+            if(dest != -1):
+              writes.append(dest)
 
 # @limits(calls=MAX_CALLS, period=MAX_PERIOD)
-def read_dest(sock, writes, connections, round_trips, wlock, rlock):
+def read_dest(sock, writes, connections, round_trips, wlock, rlock, USING_THREADS):
     print("READING RESPONSE FROM DEST")
     sock.settimeout(TIME_OUT)
     rt_item = find_rt_error(round_trips, connections, sock)
@@ -266,17 +274,17 @@ def read_dest(sock, writes, connections, round_trips, wlock, rlock):
     if (sock == rt_item.client_sock):
         with wlock:
             rt_item.req_dest = msg
-            # if(rt_item.dest_sock != -1):
-            writes.append(rt_item.dest_sock)
+            if(rt_item.dest_sock != -1):
+                writes.append(rt_item.dest_sock)
     else:
         with wlock:
             rt_item.resp_client = msg
-            # if(rt_item.client_sock != -1):
-            writes.append(rt_item.client_sock)
+            if(rt_item.client_sock != -1):
+                writes.append(rt_item.client_sock)
 
 ######## WRITES
 # @limits(calls=MAX_CALLS, period=MAX_PERIOD)
-def handle_write_sock(sock, round_trips, writes, connections, wlock, rlock, proxy_cache):
+def handle_write_sock(sock, round_trips, writes, connections, wlock, rlock, proxy_cache, USING_THREADS):
     print("Writing to socket")
     for rtconn in round_trips:
         # sock.settimeout(TIME_OUT)
@@ -284,6 +292,9 @@ def handle_write_sock(sock, round_trips, writes, connections, wlock, rlock, prox
             # print("BYTES SENT VS MSG SIZE:", sock.send(bytes(rtconn.req_dest, "utf-8")), "vs", len(bytes(rtconn.req_dest, "utf-8")))
             try:
                 print("BYTES SENT VS MSG SIZE:", sock.send(rtconn.req_dest), "vs", len(rtconn.req_dest))
+                if(len(rtconn.req_dest) == 0):
+                    sock.close()
+                    return
                 # print("IN DESTSCK", rtconn.req_dest, "vs", rtconn.resp_client)
                 add_to_cache(proxy_cache, rtconn.cache_key, rtconn.req_dest)
                 # print("         SAVED", proxy_cache[rtconn.cache_key])
@@ -298,11 +309,14 @@ def handle_write_sock(sock, round_trips, writes, connections, wlock, rlock, prox
                 except ValueError:
                     return
             with rlock:
-                # if(sock != -1):
-                connections.append(sock)
+                if(sock != -1):
+                    connections.append(sock)
         elif sock == rtconn.client_sock and rtconn.resp_client != "":
             try:
                 sock.send(rtconn.resp_client)
+                if(len(rtconn.resp_client) == 0):
+                    sock.close()
+                    return
                 # print("IN RESPCL", rtconn.req_dest, "vs", rtconn.resp_client)
                 ################# Add to the cache #################
                 add_to_cache(proxy_cache, rtconn.cache_key, rtconn.resp_client)
@@ -316,8 +330,8 @@ def handle_write_sock(sock, round_trips, writes, connections, wlock, rlock, prox
                 except ValueError:
                     return
             with rlock:
-                # if(sock != -1):
-                connections.append(sock)
+                if(sock != -1):
+                    connections.append(sock)
             # sock.close()
 
 ########################## Cache Functions #########################
@@ -358,11 +372,18 @@ def parse_hostname_port(msg):
 
 ############################### Main ###############################
 def main(argv, argc):
-    if (argc != 2):
+    if (argc < 2):
         print("Usage of command is", argv[0], "and PORTNO")
         exit(1)
 
     PORT = int(argv[1])
+    if argc > 2:
+        if argv[2] == 0:
+            global SET_USING_THREADS
+            SET_USING_THREADS = False
+        else:
+            global SET_USING_THREAD
+            SET_USING_THREADS = True       
     server = set_up_server(PORT)
 
     proxy_cache = {}
@@ -394,7 +415,7 @@ def main(argv, argc):
         
             i = 0
             for sock in read_socks:
-                if (not handle_read_sock(sock, server, writes, connections, round_trips, read_threads, write_lock, read_lock, proxy_cache)):
+                if (not handle_read_sock(sock, server, writes, connections, round_trips, read_threads, write_lock, read_lock, proxy_cache, SET_USING_THREADS)):
                     print("FAILED")
                     continue;
                 i =+ 1
@@ -402,11 +423,15 @@ def main(argv, argc):
 
             for sock in write_socks:
                 print("STARTING WRITE THREAD")
-                write_thread = threading.Thread(target=handle_write_sock, args=[sock, round_trips, writes, connections, write_lock, read_lock, proxy_cache])
-                write_threads.append(write_thread)
-                write_thread.start()
+                if SET_USING_THREADS:
+                    print("USING_THREADS")
+                    write_thread = threading.Thread(target=handle_write_sock, args=[sock, round_trips, writes, connections, write_lock, read_lock, proxy_cache, SET_USING_THREADS])
+                    write_threads.append(write_thread)
+                    write_thread.start()
+                else:
+                    handle_write_sock(sock, round_trips, writes, connections, write_lock, read_lock, proxy_cache, SET_USING_THREADS)
                 # handle_write_sock(sock, round_trips, writes, connections)
-
+            # if SET_USING_THREADS:
             for thread in read_threads:
                 thread.join()
 
